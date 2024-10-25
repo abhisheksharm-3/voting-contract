@@ -1,272 +1,220 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-contract Voting {
-
+contract VotingPlatform {
     address public owner;
     
-    enum ApprovalStatus { Pending, Approved, Rejected }
-    enum VotingStatus { Pending, Completed }
-
     struct Voter {
         bool isRegistered;
-        bool hasVoted;
-        uint256 votedProposalId;
-        string documentIPFSHash;
-        string profileImageIPFSHash;
-        ApprovalStatus approvalStatus;
+        mapping(string => bool) hasVotedInElection;  // electionId -> hasVoted
+        string userId;  // Reference to Appwrite user ID
     }
-
-    struct Proposal {
-        string name;
-        uint256 voteCount;
-        string documentIPFSHash;
-        string profileImageIPFSHash;
-        address submitter;
-        ApprovalStatus approvalStatus;
-        VotingStatus votingStatus;
+    
+    struct Election {
+        string electionId;  // UUID from frontend
+        address creator;
+        string title;
+        uint256 startTime;
+        uint256 endTime;
+        bool isActive;
+        mapping(string => uint256) candidateVotes;  // candidateId -> votes
+        string[] candidateIds;
+        uint256 totalVotes;
+        string winningCandidateId;  // Added to track winner
+        bool resultsTallied;        // Added to track if results are final
     }
-
-    enum WorkflowStatus {
-        RegisteringVoters,
-        ProposalsRegistrationStarted,
-        ProposalsRegistrationEnded,
-        VotingSessionStarted,
-        VotingSessionEnded,
-        VotesTallied
-    }
-
-    WorkflowStatus public workflowStatus;
-    uint256 private _proposalCount;
-    uint256 private _voterCount;
+    
+    // Main state variables
     mapping(address => Voter) public voters;
-    mapping(uint256 => Proposal) public proposals;
+    mapping(string => Election) private elections;  // electionId -> Election
+    string[] public activeElections;
     mapping(address => bool) public admins;
-
-    event VoterRegistered(address voterAddress);
-    event ProposalRegistered(uint256 proposalId);
-    event Voted(address voter, uint256 proposalId);
-    event WorkflowStatusChange(WorkflowStatus previousStatus, WorkflowStatus newStatus);
-    event VoterApprovalStatusChanged(address voter, ApprovalStatus status);
-    event ProposalApprovalStatusChanged(uint256 proposalId, ApprovalStatus status);
-    event AdminStatusChanged(address admin, bool isAdmin);
+    
+    // Events
+    event UserRegistered(address indexed userAddress, string userId);
+    event ElectionCreated(string indexed electionId, address creator, string title);
+    event VoteCast(string indexed electionId, string candidateId);
+    event ElectionStatusChanged(string indexed electionId, bool isActive);
+    event AdminStatusChanged(address indexed admin, bool status);
+    event ElectionResultsTallied(string indexed electionId, string winningCandidateId, uint256 winningVoteCount);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
+    
     modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can perform this action");
+        require(msg.sender == owner, "Only owner can call this");
         _;
     }
-
+    
     modifier onlyAdmin() {
-        require(admins[msg.sender] || msg.sender == owner, "Only admin or owner can perform this action");
+        require(admins[msg.sender] || msg.sender == owner, "Only admin can call this");
         _;
     }
-
+    
     constructor() {
         owner = msg.sender;
-        workflowStatus = WorkflowStatus.RegisteringVoters;
         admins[msg.sender] = true;
     }
 
+    // Ownership Management
     function transferOwnership(address newOwner) public onlyOwner {
         require(newOwner != address(0), "New owner is the zero address");
         emit OwnershipTransferred(owner, newOwner);
         owner = newOwner;
     }
 
-    function registerVoter(string memory _documentIPFSHash, string memory _profileImageIPFSHash) public {
-        require(workflowStatus == WorkflowStatus.RegisteringVoters, "Voter registration is not open");
-        require(!voters[msg.sender].isRegistered, "Voter already registered");
-
-        voters[msg.sender] = Voter({
-            isRegistered: true,
-            hasVoted: false,
-            votedProposalId: 0,
-            documentIPFSHash: _documentIPFSHash,
-            profileImageIPFSHash: _profileImageIPFSHash,
-            approvalStatus: ApprovalStatus.Pending
-        });
-
-        _voterCount++;
-        emit VoterRegistered(msg.sender);
-    }
-
-    function approveRejectVoter(address _voterAddress, ApprovalStatus _status) public onlyAdmin {
-        require(voters[_voterAddress].isRegistered, "Voter not registered");
-        voters[_voterAddress].approvalStatus = _status;
-        emit VoterApprovalStatusChanged(_voterAddress, _status);
-    }
-
-    function updateVoter(string memory _documentIPFSHash, string memory _profileImageIPFSHash) public {
-        require(voters[msg.sender].isRegistered, "Voter not registered");
-        voters[msg.sender].documentIPFSHash = _documentIPFSHash;
-        voters[msg.sender].profileImageIPFSHash = _profileImageIPFSHash;
-        voters[msg.sender].approvalStatus = ApprovalStatus.Pending;
-        emit VoterApprovalStatusChanged(msg.sender, ApprovalStatus.Pending);
-    }
-
-    function registerProposal(string memory _name, string memory _documentIPFSHash, string memory _profileImageIPFSHash) public onlyAdmin {
-        require(workflowStatus == WorkflowStatus.ProposalsRegistrationStarted, "Proposal registration is not open");
-
-        _proposalCount++;
-        uint256 newProposalId = _proposalCount;
-        proposals[newProposalId] = Proposal({
-            name: _name,
-            voteCount: 0,
-            documentIPFSHash: _documentIPFSHash,
-            profileImageIPFSHash: _profileImageIPFSHash,
-            submitter: msg.sender,
-            approvalStatus: ApprovalStatus.Pending,
-            votingStatus: VotingStatus.Pending
-        });
-
-        emit ProposalRegistered(newProposalId);
-    }
-
-    function approveRejectProposal(uint256 _proposalId, ApprovalStatus _status) public onlyAdmin {
-        require(_proposalId > 0 && _proposalId <= _proposalCount, "Invalid proposal");
-        proposals[_proposalId].approvalStatus = _status;
-        emit ProposalApprovalStatusChanged(_proposalId, _status);
-    }
-
-    function updateProposal(uint256 _proposalId, string memory _name, string memory _documentIPFSHash, string memory _profileImageIPFSHash) public onlyAdmin {
-        require(_proposalId > 0 && _proposalId <= _proposalCount, "Invalid proposal");
-        Proposal storage proposal = proposals[_proposalId];
-        proposal.name = _name;
-        proposal.documentIPFSHash = _documentIPFSHash;
-        proposal.profileImageIPFSHash = _profileImageIPFSHash;
-        proposal.approvalStatus = ApprovalStatus.Pending;
-        emit ProposalApprovalStatusChanged(_proposalId, ApprovalStatus.Pending);
-    }
-
-    function vote(uint256 _proposalId) public {
-        require(workflowStatus == WorkflowStatus.VotingSessionStarted, "Voting session hasn't started");
-        require(voters[msg.sender].approvalStatus == ApprovalStatus.Approved, "Voter not approved");
-        require(!voters[msg.sender].hasVoted, "You have already voted");
-        require(_proposalId > 0 && _proposalId <= _proposalCount, "Invalid proposal");
-        require(proposals[_proposalId].approvalStatus == ApprovalStatus.Approved, "Proposal not approved");
-
-        voters[msg.sender].hasVoted = true;
-        voters[msg.sender].votedProposalId = _proposalId;
-        proposals[_proposalId].voteCount++;
-
-        emit Voted(msg.sender, _proposalId);
-    }
-
-    function getApprovedVoters() public view returns (address[] memory) {
-        address[] memory approvedVoters = new address[](_voterCount);
-        uint256 count = 0;
-        for (uint256 i = 1; i <= _voterCount; i++) {
-            address voterAddress = address(uint160(i));
-            if (voters[voterAddress].approvalStatus == ApprovalStatus.Approved) {
-                approvedVoters[count] = voterAddress;
-                count++;
-            }
-        }
-        return approvedVoters;
-    }
-
-    function getApprovedProposals(VotingStatus _status) public view returns (uint256[] memory) {
-        uint256[] memory approvedProposals = new uint256[](_proposalCount);
-        uint256 count = 0;
-        for (uint256 i = 1; i <= _proposalCount; i++) {
-            if (proposals[i].approvalStatus == ApprovalStatus.Approved && proposals[i].votingStatus == _status) {
-                approvedProposals[count] = i;
-                count++;
-            }
-        }
-        return approvedProposals;
-    }
-
+    // Admin Management
     function setAdmin(address _adminAddress, bool _isAdmin) public onlyOwner {
         admins[_adminAddress] = _isAdmin;
         emit AdminStatusChanged(_adminAddress, _isAdmin);
     }
 
-    function startProposalRegistration() public onlyAdmin {
-        require(workflowStatus == WorkflowStatus.RegisteringVoters, "Can't start proposal registration now");
-        workflowStatus = WorkflowStatus.ProposalsRegistrationStarted;
-        emit WorkflowStatusChange(WorkflowStatus.RegisteringVoters, WorkflowStatus.ProposalsRegistrationStarted);
+    // User Management
+    function registerUser(string memory _userId) public {
+        require(!voters[msg.sender].isRegistered, "User already registered");
+        
+        Voter storage newVoter = voters[msg.sender];
+        newVoter.isRegistered = true;
+        newVoter.userId = _userId;
+        
+        emit UserRegistered(msg.sender, _userId);
     }
 
-    function endProposalRegistration() public onlyAdmin {
-        require(workflowStatus == WorkflowStatus.ProposalsRegistrationStarted, "Proposal registration is not in progress");
-        workflowStatus = WorkflowStatus.ProposalsRegistrationEnded;
-        emit WorkflowStatusChange(WorkflowStatus.ProposalsRegistrationStarted, WorkflowStatus.ProposalsRegistrationEnded);
+    // Election Management
+    function createElection(
+        string memory _electionId,
+        string memory _title,
+        uint256 _startTime,
+        uint256 _endTime,
+        string[] memory _candidateIds
+    ) public {
+        require(voters[msg.sender].isRegistered, "User not registered");
+        require(_startTime > block.timestamp, "Start time must be in future");
+        require(_endTime > _startTime, "End time must be after start time");
+        
+        Election storage newElection = elections[_electionId];
+        newElection.electionId = _electionId;
+        newElection.creator = msg.sender;
+        newElection.title = _title;
+        newElection.startTime = _startTime;
+        newElection.endTime = _endTime;
+        newElection.isActive = true;
+        newElection.candidateIds = _candidateIds;
+        newElection.resultsTallied = false;
+        
+        activeElections.push(_electionId);
+        
+        emit ElectionCreated(_electionId, msg.sender, _title);
     }
 
-    function startVotingSession() public onlyAdmin {
-        require(workflowStatus == WorkflowStatus.ProposalsRegistrationEnded, "Can't start voting session now");
-        workflowStatus = WorkflowStatus.VotingSessionStarted;
-        emit WorkflowStatusChange(WorkflowStatus.ProposalsRegistrationEnded, WorkflowStatus.VotingSessionStarted);
+    // Voting
+    function castVote(string memory _electionId, string memory _candidateId) public {
+        require(voters[msg.sender].isRegistered, "User not registered");
+        require(!voters[msg.sender].hasVotedInElection[_electionId], "Already voted in this election");
+        require(isElectionActive(_electionId), "Election is not active");
+        require(isCandidateValid(_electionId, _candidateId), "Invalid candidate");
+        
+        Election storage election = elections[_electionId];
+        require(block.timestamp >= election.startTime, "Election has not started");
+        require(block.timestamp <= election.endTime, "Election has ended");
+        
+        voters[msg.sender].hasVotedInElection[_electionId] = true;
+        election.candidateVotes[_candidateId]++;
+        election.totalVotes++;
+        
+        emit VoteCast(_electionId, _candidateId);
     }
 
-    function endVotingSession() public onlyAdmin {
-        require(workflowStatus == WorkflowStatus.VotingSessionStarted, "Voting session hasn't started");
-        workflowStatus = WorkflowStatus.VotingSessionEnded;
-        emit WorkflowStatusChange(WorkflowStatus.VotingSessionStarted, WorkflowStatus.VotingSessionEnded);
-    }
-
-    function tallyVotes() public onlyAdmin {
-        require(workflowStatus == WorkflowStatus.VotingSessionEnded, "Can't tally votes before voting session is ended");
-        workflowStatus = WorkflowStatus.VotesTallied;
-        for (uint256 i = 1; i <= _proposalCount; i++) {
-            if (proposals[i].approvalStatus == ApprovalStatus.Approved) {
-                proposals[i].votingStatus = VotingStatus.Completed;
+    // Results and Tallying
+    function tallyElectionResults(string memory _electionId) public onlyAdmin {
+        Election storage election = elections[_electionId];
+        require(!election.resultsTallied, "Results already tallied");
+        require(block.timestamp > election.endTime, "Election not ended yet");
+        
+        uint256 highestVotes = 0;
+        string memory winningCandidate = "";
+        
+        for (uint i = 0; i < election.candidateIds.length; i++) {
+            string memory candidateId = election.candidateIds[i];
+            uint256 votes = election.candidateVotes[candidateId];
+            if (votes > highestVotes) {
+                highestVotes = votes;
+                winningCandidate = candidateId;
             }
         }
-        emit WorkflowStatusChange(WorkflowStatus.VotingSessionEnded, WorkflowStatus.VotesTallied);
+        
+        election.winningCandidateId = winningCandidate;
+        election.resultsTallied = true;
+        
+        emit ElectionResultsTallied(_electionId, winningCandidate, highestVotes);
     }
 
-    function getWinningProposal() public view returns (uint256 winningProposalId) {
-        require(workflowStatus == WorkflowStatus.VotesTallied, "Votes have not been tallied yet");
-        uint256 winningVoteCount = 0;
-        for (uint256 p = 1; p <= _proposalCount; p++) {
-            if (proposals[p].voteCount > winningVoteCount) {
-                winningVoteCount = proposals[p].voteCount;
-                winningProposalId = p;
+    // View Functions
+    function getElectionDetails(string memory _electionId) public view returns (
+        address creator,
+        string memory title,
+        uint256 startTime,
+        uint256 endTime,
+        bool isActive,
+        uint256 totalVotes,
+        string[] memory candidateIds,
+        string memory winningCandidateId,
+        bool resultsTallied
+    ) {
+        Election storage election = elections[_electionId];
+        return (
+            election.creator,
+            election.title,
+            election.startTime,
+            election.endTime,
+            election.isActive,
+            election.totalVotes,
+            election.candidateIds,
+            election.winningCandidateId,
+            election.resultsTallied
+        );
+    }
+    
+    function getCandidateVotes(string memory _electionId, string memory _candidateId) 
+        public view returns (uint256) 
+    {
+        return elections[_electionId].candidateVotes[_candidateId];
+    }
+    
+    function isElectionActive(string memory _electionId) public view returns (bool) {
+        Election storage election = elections[_electionId];
+        return election.isActive && 
+               block.timestamp >= election.startTime && 
+               block.timestamp <= election.endTime;
+    }
+
+    function getWinningCandidate(string memory _electionId) public view returns (
+        string memory winningCandidateId,
+        uint256 winningVoteCount
+    ) {
+        Election storage election = elections[_electionId];
+        require(election.resultsTallied, "Results not tallied yet");
+        
+        winningCandidateId = election.winningCandidateId;
+        winningVoteCount = election.candidateVotes[winningCandidateId];
+    }
+
+    function getActiveElectionsCount() public view returns (uint256) {
+        return activeElections.length;
+    }
+
+    function hasUserVoted(string memory _electionId, address _voter) public view returns (bool) {
+        return voters[_voter].hasVotedInElection[_electionId];
+    }
+    
+    // Helper Functions
+    function isCandidateValid(string memory _electionId, string memory _candidateId) 
+        internal view returns (bool) 
+    {
+        string[] memory candidates = elections[_electionId].candidateIds;
+        for (uint i = 0; i < candidates.length; i++) {
+            if (keccak256(bytes(candidates[i])) == keccak256(bytes(_candidateId))) {
+                return true;
             }
         }
-    }
-
-    function getProposal(uint256 _proposalId) public view returns (
-        string memory name,
-        uint256 voteCount,
-        string memory documentIPFSHash,
-        string memory profileImageIPFSHash,
-        address submitter,
-        ApprovalStatus approvalStatus,
-        VotingStatus votingStatus
-    ) {
-        require(_proposalId > 0 && _proposalId <= _proposalCount, "Invalid proposal");
-        Proposal storage proposal = proposals[_proposalId];
-        return (
-            proposal.name,
-            proposal.voteCount,
-            proposal.documentIPFSHash,
-            proposal.profileImageIPFSHash,
-            proposal.submitter,
-            proposal.approvalStatus,
-            proposal.votingStatus
-        );
-    }
-
-    function getVoter(address _voterAddress) public view returns (
-        bool isRegistered,
-        bool hasVoted,
-        uint256 votedProposalId,
-        string memory documentIPFSHash,
-        string memory profileImageIPFSHash,
-        ApprovalStatus approvalStatus
-    ) {
-        Voter storage voter = voters[_voterAddress];
-        return (
-            voter.isRegistered,
-            voter.hasVoted,
-            voter.votedProposalId,
-            voter.documentIPFSHash,
-            voter.profileImageIPFSHash,
-            voter.approvalStatus
-        );
+        return false;
     }
 }
