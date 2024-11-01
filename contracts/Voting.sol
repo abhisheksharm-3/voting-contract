@@ -217,4 +217,57 @@ contract VotingPlatform {
         }
         return false;
     }
+    // Function to get all active elections
+function getAllActiveElections() public view returns (string[] memory) {
+    return activeElections;
+}
+
+// Function to update an existing election (only by the election creator or an admin)
+function updateElection(
+    string memory _electionId,
+    string memory _newTitle,
+    uint256 _newStartTime,
+    uint256 _newEndTime,
+    string[] memory _newCandidateIds
+) public {
+    Election storage election = elections[_electionId];
+    
+    // Ensure only the creator or an admin can update the election
+    require(
+        msg.sender == election.creator || admins[msg.sender], 
+        "Only election creator or admin can update"
+    );
+    
+    // Ensure the election hasn't started yet
+    require(
+        block.timestamp < election.startTime, 
+        "Cannot update an election that has already started"
+    );
+    
+    // Validate new times
+    require(_newStartTime > block.timestamp, "Start time must be in future");
+    require(_newEndTime > _newStartTime, "End time must be after start time");
+    
+    // Update election details
+    election.title = _newTitle;
+    election.startTime = _newStartTime;
+    election.endTime = _newEndTime;
+    
+    // Clear existing candidates and set new candidates
+    delete election.candidateIds;
+    election.candidateIds = _newCandidateIds;
+    
+    // Reset vote tracking for the election
+    election.totalVotes = 0;
+    election.resultsTallied = false;
+    election.winningCandidateId = "";
+    
+    // Clear existing candidate votes
+    for (uint i = 0; i < _newCandidateIds.length; i++) {
+        election.candidateVotes[_newCandidateIds[i]] = 0;
+    }
+    
+    // Emit an event to notify about the election update
+    emit ElectionStatusChanged(_electionId, true);
+}
 }
